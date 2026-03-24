@@ -5,17 +5,34 @@ import os
 load_dotenv()
 
 NEBULA_BASE_URL = 'https://nebula.cs.vu.nl/api/'
-NEBULA_API_KEY = os.getenv('NEBULA_API_KEY')
-NEBULA = OpenAI(base_url=NEBULA_BASE_URL, api_key=NEBULA_API_KEY)
+_NEBULA_CLIENT = None
+
+
+def get_nebula_client() -> OpenAI:
+    global _NEBULA_CLIENT
+
+    if _NEBULA_CLIENT is None:
+        nebula_api_key = os.getenv('NEBULA_API_KEY')
+        if not nebula_api_key:
+            raise RuntimeError(
+                "Missing NEBULA_API_KEY. Create a .env file in the project root with:\n"
+                "NEBULA_API_KEY=YOUR_KEY_HERE"
+            )
+
+        _NEBULA_CLIENT = OpenAI(base_url=NEBULA_BASE_URL, api_key=nebula_api_key)
+
+    return _NEBULA_CLIENT
 
 
 def get_nebula_models():
+    nebula = get_nebula_client()
     models = []
-    for model in NEBULA.models.list().data:
+    for model in nebula.models.list().data:
         models.append(model.id)
     return models
 
 def prompt_nebula(model, system_prompt, user_prompt, configs=None):
+    nebula = get_nebula_client()
     prompt_parameters = {
         "model": model,
         "messages": [
@@ -27,7 +44,7 @@ def prompt_nebula(model, system_prompt, user_prompt, configs=None):
     if configs:
         prompt_parameters.update(configs)
 
-    response = NEBULA.chat.completions.create(**prompt_parameters)
+    response = nebula.chat.completions.create(**prompt_parameters)
 
     return response
 
