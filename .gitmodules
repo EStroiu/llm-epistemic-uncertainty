@@ -1,0 +1,3 @@
+[submodule "external/fever"]
+	path = external/fever
+	url = https://huggingface.co/datasets/fever/fever
