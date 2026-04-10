@@ -1,3 +1,6 @@
 openai
 python-dotenv
 matplotlib
+datasets
+scikit-learn
+scipy
