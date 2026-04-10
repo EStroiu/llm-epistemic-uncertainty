@@ -1,10 +1,12 @@
 import argparse
 import csv
 from datetime import datetime
+import html
 import json
 import math
 import os
 import re
+import statistics
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -588,7 +590,7 @@ def _create_visualizations(output_dir: str, rows: List[Dict[str, Any]]) -> None:
             f.write("matplotlib not available. Install with: pip install matplotlib\n")
         return
 
-    # 1) Average fragility by temperature
+    # 1) Average fragility by temperature with error bars
     by_temp: Dict[float, List[float]] = {}
     for r in rows:
         v = r.get("mean_claim_fragility")
@@ -600,43 +602,60 @@ def _create_visualizations(output_dir: str, rows: List[Dict[str, Any]]) -> None:
     if by_temp:
         temps = sorted(by_temp.keys())
         means = [sum(by_temp[t]) / len(by_temp[t]) for t in temps]
+        stds = [statistics.stdev(by_temp[t]) if len(by_temp[t]) > 1 else 0.0 for t in temps]
         plt.figure(figsize=(7, 4))
-        plt.bar([str(t) for t in temps], means)
+        plt.bar([str(t) for t in temps], means, yerr=stds, capsize=5)
         plt.xlabel("Temperature")
         plt.ylabel("Average claim fragility")
-        plt.title("Fragility by temperature")
+        plt.title("Fragility by temperature (mean +/- std)")
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "fragility_by_temperature.png"), dpi=140)
+        plt.savefig(os.path.join(output_dir, "fragility_by_temperature.pdf"))
         plt.close()
 
-    # 2) Severity counts (stacked per temperature)
-    sev_counts: Dict[float, Dict[str, int]] = {}
+    # 2) Severity counts by temperature with error bars across runs.
+    sev_counts_per_run: Dict[Tuple[float, int], Dict[str, int]] = {}
     for r in rows:
         t = float(r["temperature"])
-        cur = sev_counts.setdefault(t, {"low": 0, "medium": 0, "high": 0})
+        run_index = int(r.get("run_index", 1))
+        cur = sev_counts_per_run.setdefault((t, run_index), {"low": 0, "medium": 0, "high": 0})
         cur["low"] += int(r.get("num_low_claims", 0))
         cur["medium"] += int(r.get("num_medium_claims", 0))
         cur["high"] += int(r.get("num_high_claims", 0))
 
-    if sev_counts:
-        temps = sorted(sev_counts.keys())
-        lows = [sev_counts[t]["low"] for t in temps]
-        meds = [sev_counts[t]["medium"] for t in temps]
-        highs = [sev_counts[t]["high"] for t in temps]
+    if sev_counts_per_run:
+        sev_by_temp: Dict[float, Dict[str, List[int]]] = {}
+        for (temp, _run_idx), sev in sev_counts_per_run.items():
+            bucket = sev_by_temp.setdefault(temp, {"low": [], "medium": [], "high": []})
+            bucket["low"].append(sev["low"])
+            bucket["medium"].append(sev["medium"])
+            bucket["high"].append(sev["high"])
 
-        plt.figure(figsize=(8, 4.5))
+        temps = sorted(sev_by_temp.keys())
+        low_means = [sum(sev_by_temp[t]["low"]) / len(sev_by_temp[t]["low"]) for t in temps]
+        med_means = [sum(sev_by_temp[t]["medium"]) / len(sev_by_temp[t]["medium"]) for t in temps]
+        high_means = [sum(sev_by_temp[t]["high"]) / len(sev_by_temp[t]["high"]) for t in temps]
+
+        low_stds = [statistics.stdev(sev_by_temp[t]["low"]) if len(sev_by_temp[t]["low"]) > 1 else 0.0 for t in temps]
+        med_stds = [statistics.stdev(sev_by_temp[t]["medium"]) if len(sev_by_temp[t]["medium"]) > 1 else 0.0 for t in temps]
+        high_stds = [statistics.stdev(sev_by_temp[t]["high"]) if len(sev_by_temp[t]["high"]) > 1 else 0.0 for t in temps]
+
+        plt.figure(figsize=(9, 4.8))
         x = list(range(len(temps)))
-        plt.bar(x, lows, label="low")
-        plt.bar(x, meds, bottom=lows, label="medium")
-        bottoms = [l + m for l, m in zip(lows, meds)]
-        plt.bar(x, highs, bottom=bottoms, label="high")
+        w = 0.22
+        x_low = [v - w for v in x]
+        x_med = x
+        x_high = [v + w for v in x]
+
+        plt.bar(x_low, low_means, width=w, yerr=low_stds, capsize=4, label="low")
+        plt.bar(x_med, med_means, width=w, yerr=med_stds, capsize=4, label="medium")
+        plt.bar(x_high, high_means, width=w, yerr=high_stds, capsize=4, label="high")
         plt.xticks(x, [str(t) for t in temps])
         plt.xlabel("Temperature")
-        plt.ylabel("Total claim count")
-        plt.title("Claim severities by temperature")
+        plt.ylabel("Claim count per run")
+        plt.title("Claim severities by temperature (mean +/- std)")
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "claim_severity_by_temperature.png"), dpi=140)
+        plt.savefig(os.path.join(output_dir, "claim_severity_by_temperature.pdf"))
         plt.close()
 
     # 3) Scatter answer length vs mean fragility
@@ -656,8 +675,142 @@ def _create_visualizations(output_dir: str, rows: List[Dict[str, Any]]) -> None:
         plt.ylabel("Mean claim fragility")
         plt.title("Answer length vs fragility")
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "answer_length_vs_fragility.png"), dpi=140)
+        plt.savefig(os.path.join(output_dir, "answer_length_vs_fragility.pdf"))
         plt.close()
+
+
+def _gap_to_color(prob_gap: float) -> str:
+    # Red (low confidence) to green (high confidence).
+    g = max(0.0, min(1.0, prob_gap))
+    r = int(round((1.0 - g) * 230 + 25))
+    gg = int(round(g * 160 + 60))
+    b = 70
+    return f"rgb({r},{gg},{b})"
+
+
+def _save_confidence_html(path: str, result: Dict[str, Any], prompt_text: str) -> None:
+    answer_text = result.get("answer_text", "") or ""
+    token_signals = result.get("token_signals", []) or []
+
+    if not answer_text:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("<html><body><p>No answer text available.</p></body></html>")
+        return
+
+    # Sentence confidence summary.
+    sentence_rows = []
+    for m in SENTENCE_RE.finditer(answer_text):
+        sentence = m.group(0).strip()
+        if not sentence:
+            continue
+        s, e = m.start(), m.end()
+        gaps = []
+        for t in token_signals:
+            ts = int(t.get("start", -1))
+            te = int(t.get("end", -1))
+            gp = t.get("prob_gap")
+            if gp is None:
+                continue
+            if te > s and ts < e:
+                gaps.append(float(gp))
+        conf = (sum(gaps) / len(gaps)) if gaps else None
+        sentence_rows.append((sentence, conf))
+
+    # Inline token confidence rendering.
+    pieces: List[str] = []
+    cursor = 0
+    sorted_tokens = sorted(token_signals, key=lambda x: int(x.get("start", -1)))
+    for t in sorted_tokens:
+        start = int(t.get("start", -1))
+        end = int(t.get("end", -1))
+        if start < 0 or end <= start:
+            continue
+        if start >= len(answer_text):
+            continue
+        start = max(start, cursor)
+        end = min(end, len(answer_text))
+        if end <= start:
+            continue
+
+        if cursor < start:
+            pieces.append(html.escape(answer_text[cursor:start]))
+
+        token_txt = answer_text[start:end]
+        gap = t.get("prob_gap")
+        if gap is None:
+            pieces.append(html.escape(token_txt))
+        else:
+            gap_f = float(gap)
+            color = _gap_to_color(gap_f)
+            title = f"prob_gap={gap_f:.3f}"
+            pieces.append(
+                f"<span class='tok' style='background:{color}' title='{html.escape(title)}'>{html.escape(token_txt)}</span>"
+            )
+        cursor = end
+
+    if cursor < len(answer_text):
+        pieces.append(html.escape(answer_text[cursor:]))
+
+    sent_rows_html = []
+    for sentence, conf in sentence_rows:
+        if conf is None:
+            conf_txt = "n/a"
+            width = 0
+            bar_color = "#999"
+        else:
+            conf_txt = f"{conf:.3f}"
+            width = int(round(max(0.0, min(1.0, conf)) * 100))
+            bar_color = _gap_to_color(conf)
+        sent_rows_html.append(
+            "<tr>"
+            f"<td>{html.escape(sentence)}</td>"
+            f"<td>{conf_txt}</td>"
+            f"<td><div class='bar'><div class='fill' style='width:{width}%;background:{bar_color}'></div></div></td>"
+            "</tr>"
+        )
+
+    html_doc = f"""<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <title>Confidence Map</title>
+  <style>
+    body {{ font-family: Helvetica, Arial, sans-serif; margin: 18px; line-height: 1.45; }}
+    h1, h2 {{ margin: 0 0 8px 0; }}
+    .block {{ margin-top: 14px; }}
+    .answer {{ border: 1px solid #ddd; padding: 12px; border-radius: 8px; white-space: pre-wrap; }}
+    .tok {{ border-radius: 3px; padding: 0 1px; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    th, td {{ border: 1px solid #ddd; padding: 7px; vertical-align: top; }}
+    .bar {{ width: 100%; height: 12px; background: #eee; border-radius: 8px; }}
+    .fill {{ height: 12px; border-radius: 8px; }}
+  </style>
+</head>
+<body>
+  <h1>Model Confidence Map</h1>
+    <div class=\"block\">
+        <h2>Original Prompt</h2>
+        <div class=\"answer\">{html.escape(prompt_text)}</div>
+    </div>
+  <div class=\"block\">
+    <h2>Token-level Confidence (green=more confident, red=less confident)</h2>
+    <div class=\"answer\">{''.join(pieces)}</div>
+  </div>
+  <div class=\"block\">
+    <h2>Sentence-level Confidence</h2>
+    <table>
+      <thead><tr><th>Sentence</th><th>Mean confidence</th><th>Bar</th></tr></thead>
+      <tbody>
+        {''.join(sent_rows_html)}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
+"""
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html_doc)
 
 
 def _run_batch_live(
@@ -670,6 +823,7 @@ def _run_batch_live(
     system_prompt: str,
     prompts: List[str],
     temperatures: List[float],
+    num_runs: int,
     max_tokens: int,
     top_logprobs: int,
 ) -> None:
@@ -678,39 +832,56 @@ def _run_batch_live(
     run_id = f"{experiment_name}_{_timestamp()}"
     run_dir = os.path.join(output_dir, run_id)
     _ensure_dir(run_dir)
+    sentence_dir = os.path.join(run_dir, "sentence_confidence")
+    _ensure_dir(sentence_dir)
+    result_json_dir = os.path.join(run_dir, "result_jsons")
+    _ensure_dir(result_json_dir)
 
     rows: List[Dict[str, Any]] = []
 
-    for p_idx, prompt in enumerate(prompts, start=1):
-        for temp in temperatures:
-            result = run_logit_gap_claim_detection_live(
-                base_url=base_url,
-                api_key=api_key,
-                model=model,
-                system_prompt=system_prompt,
-                user_prompt=prompt,
-                max_tokens=max_tokens,
-                temperature=temp,
-                top_logprobs=top_logprobs,
-            )
+    for run_idx in range(1, num_runs + 1):
+        print(f"\n[run {run_idx}/{num_runs}]")
+        for p_idx, prompt in enumerate(prompts, start=1):
+            for temp in temperatures:
+                result = run_logit_gap_claim_detection_live(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temp,
+                    top_logprobs=top_logprobs,
+                )
 
-            safe_temp = str(temp).replace(".", "_")
-            single_path = os.path.join(run_dir, f"result_prompt{p_idx:03d}_t{safe_temp}.json")
-            _save_json(single_path, result)
+                safe_temp = str(temp).replace(".", "_")
+                single_path = os.path.join(
+                    result_json_dir,
+                    f"result_run{run_idx:02d}_prompt{p_idx:03d}_t{safe_temp}.json",
+                )
+                _save_json(single_path, result)
 
-            row = _result_summary_row(
-                run_id=run_id,
-                prompt_id=p_idx,
-                model=model,
-                temperature=temp,
-                result=result,
-            )
-            rows.append(row)
+                confidence_html = os.path.join(
+                    sentence_dir,
+                    f"confidence_run{run_idx:02d}_prompt{p_idx:03d}_t{safe_temp}.html",
+                )
+                _save_confidence_html(confidence_html, result, prompt)
 
-            print(
-                f"[saved] prompt={p_idx} temp={temp} claims={row['num_claim_spans']} "
-                f"high={row['num_high_claims']} mean_frag={row['mean_claim_fragility']}"
-            )
+                row = _result_summary_row(
+                    run_id=run_id,
+                    prompt_id=p_idx,
+                    model=model,
+                    temperature=temp,
+                    result=result,
+                )
+                row["run_index"] = run_idx
+                rows.append(row)
+
+                print(
+                    f"[saved] run={run_idx} prompt={p_idx} temp={temp} "
+                    f"claims={row['num_claim_spans']} high={row['num_high_claims']} "
+                    f"mean_frag={row['mean_claim_fragility']}"
+                )
 
     summary_csv = os.path.join(run_dir, "summary.csv")
     _save_summary_csv(summary_csv, rows)
@@ -721,6 +892,7 @@ def _run_batch_live(
         "base_url": base_url,
         "num_prompts": len(prompts),
         "temperatures": temperatures,
+        "num_runs": num_runs,
         "max_tokens": max_tokens,
         "top_logprobs": top_logprobs,
     }
@@ -743,6 +915,7 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=220)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--temperatures", default="0.2", help="Comma-separated temperatures for batch mode, e.g. 0.0,0.2,0.5")
+    parser.add_argument("--num-runs", type=int, default=1, help="Number of repeated runs per prompt/temperature in batch mode")
     parser.add_argument("--top-logprobs", type=int, default=5)
     parser.add_argument("--prompts-file", help="Batch mode: .txt (one prompt per line) or .json (list of prompts)")
     parser.add_argument("--output-dir", default="experiments")
@@ -766,6 +939,8 @@ def main() -> None:
             raise SystemExit("No prompts found in --prompts-file")
 
         temperatures = _parse_temperatures(args.temperatures)
+        if args.num_runs < 1:
+            raise SystemExit("--num-runs must be >= 1")
         _run_batch_live(
             output_dir=args.output_dir,
             experiment_name=args.experiment_name,
@@ -775,6 +950,7 @@ def main() -> None:
             system_prompt=args.system,
             prompts=prompts,
             temperatures=temperatures,
+            num_runs=args.num_runs,
             max_tokens=args.max_tokens,
             top_logprobs=args.top_logprobs,
         )
