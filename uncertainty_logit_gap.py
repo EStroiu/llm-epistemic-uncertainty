@@ -75,8 +75,37 @@ def _extract_message_text(response: Any) -> str:
     choices = _obj_get(response, "choices", [])
     if not choices:
         return ""
-    message = _obj_get(choices[0], "message", None)
-    return _obj_get(message, "content", "") or ""
+    first = choices[0]
+
+    # Chat-completions shape
+    message = _obj_get(first, "message", None)
+    if message is not None:
+        content = _obj_get(message, "content", "")
+        if isinstance(content, str):
+            return content
+
+        # Some providers return structured content chunks.
+        if isinstance(content, list):
+            chunks: List[str] = []
+            for part in content:
+                if isinstance(part, str):
+                    chunks.append(part)
+                    continue
+                if isinstance(part, dict):
+                    text_value = part.get("text") or part.get("content")
+                    if isinstance(text_value, str):
+                        chunks.append(text_value)
+            return "".join(chunks).strip()
+
+        if isinstance(content, dict):
+            text_value = content.get("text") or content.get("content")
+            if isinstance(text_value, str):
+                return text_value
+
+        return ""
+
+    # Legacy completions shape
+    return _obj_get(first, "text", "") or ""
 
 
 def _extract_token_logprobs(response: Any) -> List[Any]:
@@ -85,13 +114,50 @@ def _extract_token_logprobs(response: Any) -> List[Any]:
         return []
 
     first_choice = choices[0]
-    # OpenAI-compatible chat format usually uses: choice.logprobs.content
     choice_logprobs = _obj_get(first_choice, "logprobs", None)
     if choice_logprobs is None:
         return []
 
+    # OpenAI-compatible chat format: choice.logprobs.content
     content = _obj_get(choice_logprobs, "content", None)
-    return content or []
+    if content:
+        return content
+
+    # OpenAI-compatible legacy completions format:
+    # choice.logprobs.token_logprobs + choice.logprobs.top_logprobs + choice.logprobs.tokens
+    tokens = _obj_get(choice_logprobs, "tokens", None) or []
+    token_logprobs = _obj_get(choice_logprobs, "token_logprobs", None) or []
+    top_logprobs = _obj_get(choice_logprobs, "top_logprobs", None) or []
+
+    if tokens and token_logprobs and len(tokens) == len(token_logprobs):
+        normalized: List[Dict[str, Any]] = []
+        for i, tok in enumerate(tokens):
+            top_items = []
+            top_map = top_logprobs[i] if i < len(top_logprobs) else None
+            if isinstance(top_map, dict):
+                for cand_tok, cand_lp in top_map.items():
+                    if cand_lp is None:
+                        continue
+                    top_items.append({"token": str(cand_tok), "logprob": float(cand_lp)})
+
+            normalized.append(
+                {
+                    "token": str(tok),
+                    "logprob": float(token_logprobs[i]) if token_logprobs[i] is not None else float("nan"),
+                    "top_logprobs": top_items,
+                }
+            )
+        return normalized
+
+    return []
+
+
+def _build_completion_prompt(system_prompt: str, user_prompt: str) -> str:
+    return (
+        f"System: {system_prompt.strip()}\n\n"
+        f"User: {user_prompt.strip()}\n\n"
+        "Assistant:"
+    )
 
 
 def _extract_usage(response: Any) -> Any:
@@ -343,19 +409,62 @@ def run_logit_gap_claim_detection_live(
         raise RuntimeError("openai package is required for live mode") from exc
 
     client = OpenAI(base_url=base_url, api_key=api_key)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=max_tokens,
-        temperature=temperature,
-        logprobs=True,
-        top_logprobs=top_logprobs,
-        stream=False,
-    )
-    return analyze_response_for_logit_gap_claims(response, requested_top_logprobs=top_logprobs)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # Some LiteLLM/OpenWebUI routes reject logprob params unless explicitly allow-listed.
+    # If still unsupported, retry without logprobs so the run can continue in fallback mode.
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            logprobs=True,
+            top_logprobs=top_logprobs,
+            stream=False,
+            extra_body={"allowed_openai_params": ["logprobs", "top_logprobs"]},
+        )
+    except Exception:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=False,
+        )
+
+    analyzed = analyze_response_for_logit_gap_claims(response, requested_top_logprobs=top_logprobs)
+    if analyzed["provider_capabilities"]["token_logprobs_available"]:
+        return analyzed
+
+    # Fallback attempt: some OpenAI-compatible backends only expose token logprobs
+    # on legacy completions endpoint, not chat completions.
+    try:
+        completion_response = client.completions.create(
+            model=model,
+            prompt=_build_completion_prompt(system_prompt, user_prompt),
+            max_tokens=max_tokens,
+            temperature=temperature,
+            logprobs=top_logprobs,
+            stream=False,
+            extra_body={"allowed_openai_params": ["logprobs"]},
+        )
+        completion_analyzed = analyze_response_for_logit_gap_claims(
+            completion_response,
+            requested_top_logprobs=top_logprobs,
+        )
+        if completion_analyzed["provider_capabilities"]["token_logprobs_available"]:
+            completion_analyzed["provider_capabilities"]["signal_source"] = "token_logprobs_completions"
+            completion_analyzed["provider_capabilities"]["chat_logprobs_unavailable"] = True
+            return completion_analyzed
+    except Exception:
+        # Keep original chat response result if completions fallback fails.
+        pass
+
+    return analyzed
 
 
 def _pretty_print_result(result: Dict[str, Any]) -> None:
@@ -387,7 +496,7 @@ def _ensure_dir(path: str) -> None:
 
 
 def _timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def _save_json(path: str, payload: Any) -> None:
