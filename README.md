@@ -77,3 +77,28 @@ Outputs are saved under `experiments/fever_<config>_<split>_<timestamp>/`:
 	- `uncertainty_correct_vs_incorrect.pdf`
 	- `calibration_reliability.pdf`
 
+## Run unit tests
+
+I added unit tests for FEVER helper functions.
+Run this from the project root:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+## Label-Ambiguity Uncertainty Benchmark
+
+This method asks the model for probabilities of the three FEVER labels and computes uncertainty as normalized entropy over those probabilities.
+
+Quick pilot run (~1 minute depending on API latency):
+
+```bash
+QUICK_RUN=1 ./run_label_ambiguity_benchmark.sh
+```
+
+Full run (same scale as Elena's FEVER setup):
+
+```bash
+MAX_EXAMPLES=200 NUM_RUNS=3 ./run_label_ambiguity_benchmark.sh
+```
+
