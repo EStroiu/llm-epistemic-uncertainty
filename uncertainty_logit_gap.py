@@ -8,7 +8,13 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except Exception:  # allows running tests without optional deps installed globally
+    def load_dotenv() -> bool:
+        return False
+
+from uncertainty_schema import EstimatorOutput, build_uncertainty_payload
 
 
 NUMBER_RE = re.compile(r"\b\d[\d,]*(?:\.\d+)?\b")
@@ -306,6 +312,49 @@ def analyze_response_for_logit_gap_claims(response: Any, *, requested_top_logpro
                 }
             )
 
+    mean_claim_fragility: Optional[float] = None
+    if claim_spans:
+        fragility_values = [c.fragility_score for c in claim_spans if c.fragility_score is not None]
+        if fragility_values:
+            mean_claim_fragility = sum(fragility_values) / len(fragility_values)
+
+    fallback_uncertainty: Optional[float] = None
+    if token_signals and mean_claim_fragility is None:
+        token_gaps = [t.prob_gap for t in token_signals if t.prob_gap is not None]
+        if token_gaps:
+            fallback_uncertainty = 1.0 - max(0.0, min(1.0, sum(token_gaps) / len(token_gaps)))
+
+    overall_uncertainty = mean_claim_fragility
+    if overall_uncertainty is None:
+        overall_uncertainty = fallback_uncertainty
+    if overall_uncertainty is None:
+        overall_uncertainty = 0.5
+
+    estimator = EstimatorOutput(
+        name="logit_gap_fragility",
+        uncertainty=overall_uncertainty,
+        confidence=1.0 - overall_uncertainty,
+        details={
+            "token_logprobs_available": has_token_scores,
+            "num_claim_spans": len(claim_spans),
+            "num_highlights": len(highlights),
+            "mean_claim_fragility": mean_claim_fragility,
+            "fallback_uncertainty": fallback_uncertainty,
+        },
+        weight=1.0,
+    )
+
+    uncertainty_payload = build_uncertainty_payload(
+        content=text,
+        estimators=[estimator],
+        prompt_variant="default",
+        expression="metadata_only",
+        metadata={
+            "source": "uncertainty_logit_gap.py",
+            "requested_top_logprobs": requested_top_logprobs,
+        },
+    )
+
     return {
         "answer_text": text,
         "provider_capabilities": {
@@ -319,6 +368,7 @@ def analyze_response_for_logit_gap_claims(response: Any, *, requested_top_logpro
         "claim_spans": [asdict(c) for c in claim_spans],
         "highlights": [asdict(h) for h in highlights],
         "fallback_claim_candidates": fallback_claim_candidates,
+        "uncertainty_payload": uncertainty_payload,
     }
 
 

@@ -1,6 +1,10 @@
 from openai import OpenAI
-from dotenv import load_dotenv
 import os
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv() -> bool:
+        return False
 
 load_dotenv()
 

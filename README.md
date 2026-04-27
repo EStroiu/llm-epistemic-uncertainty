@@ -42,3 +42,64 @@ What it does:
 - Sends a simple chat completion request
 - Prints the model response and usage stats
 
+## Unified uncertainty payload
+
+`uncertainty_logit_gap.py` now also returns a standardized `uncertainty_payload` block with:
+
+- `content`
+- `uncertainty.overall_uncertainty`
+- `uncertainty.overall_confidence`
+- `uncertainty.reliability`
+- `uncertainty.estimators[]`
+- lightweight metadata for downstream consumers (for example embodied agents)
+
+## Quick tests
+
+Run a short smoke test suite:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+## Multi-estimator benchmark (points 2-4)
+
+`uncertainty_benchmark.py` runs one unified pipeline with:
+
+- sampling variance estimator
+- self-disagreement estimator
+- NLI consistency estimator
+- prompt variants (`none`, `brief`, `numeric`, `calibrated`)
+- uncertainty + clarity/interpretability metrics
+
+### 1) Very fast smoke benchmark (no API calls)
+
+```bash
+python uncertainty_benchmark.py \
+  --dataset-path tests/data/tiny_fever.jsonl \
+  --max-examples 3 \
+  --n-samples 3 \
+  --nli-pairs 2 \
+  --variant numeric \
+  --dry-run
+```
+
+### 2) Short live run (about 1-2 minutes depending on model queue)
+
+```bash
+python uncertainty_benchmark.py \
+  --dataset-path path/to/fever_subset.jsonl \
+  --model FAST.gpt-oss:120b \
+  --max-examples 5 \
+  --n-samples 3 \
+  --nli-pairs 2 \
+  --variant calibrated
+```
+
+### 3) Final variant comparison
+
+Run 4 short jobs with variants `none`, `brief`, `numeric`, `calibrated` and compare:
+
+- `metrics.json` (`error_detection_auroc`, `nei_detection_auroc`, `spearman_uncertainty_error`, `ece_confidence`)
+- `avg_clarity_score`
+- `avg_interpretability_score`
+
