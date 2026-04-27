@@ -109,12 +109,26 @@ This project now includes a minimal local API service:
 
 - `GET /health`
 - `POST /infer` -> returns `content + uncertainty metadata` payload
+- `GET /dashboard` -> optional browser UI for manual exploration
 
 Start the server:
 
 ```bash
 uvicorn uncertainty_service_api:app --host 127.0.0.1 --port 8000
 ```
+
+Open the dashboard (optional):
+
+```text
+http://127.0.0.1:8000/dashboard
+```
+
+### Important distinction
+
+- **Research/integration API (canonical):** `POST /infer`
+- **Dashboard:** convenience client that calls the same `/infer` endpoint
+
+Student B integration should treat `/infer` as the stable interface; dashboard is only for manual checks/demo.
 
 Quick dry-run request (no Nebula call):
 
@@ -128,5 +142,23 @@ curl -X POST "http://127.0.0.1:8000/infer" \
 
 ```bash
 python -m unittest tests/test_uncertainty_service_api.py
+```
+
+PowerShell examples:
+
+```powershell
+Invoke-RestMethod -Method GET -Uri "http://127.0.0.1:8000/health"
+```
+
+```powershell
+$body = @{
+  query = "Paris is the capital of France."
+  variant = "numeric"
+  n_samples = 3
+  nli_pairs = 2
+  dry_run = $true
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8000/infer" -ContentType "application/json" -Body $body
 ```
 

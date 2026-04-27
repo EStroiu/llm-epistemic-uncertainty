@@ -31,6 +31,10 @@ class TestUncertaintyServiceAPI(unittest.TestCase):
         self.assertEqual(health.status_code, 200)
         self.assertEqual(health.json()["status"], "ok")
 
+        dashboard = client.get("/dashboard")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn("LLM Uncertainty Dashboard", dashboard.text)
+
         res = client.post(
             "/infer",
             json={
