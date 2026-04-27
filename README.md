@@ -103,3 +103,30 @@ Run 4 short jobs with variants `none`, `brief`, `numeric`, `calibrated` and comp
 - `avg_clarity_score`
 - `avg_interpretability_score`
 
+## Local API for Student B handoff
+
+This project now includes a minimal local API service:
+
+- `GET /health`
+- `POST /infer` -> returns `content + uncertainty metadata` payload
+
+Start the server:
+
+```bash
+uvicorn uncertainty_service_api:app --host 127.0.0.1 --port 8000
+```
+
+Quick dry-run request (no Nebula call):
+
+```bash
+curl -X POST "http://127.0.0.1:8000/infer" \
+  -H "Content-Type: application/json" \
+  -d "{\"query\":\"Paris is the capital of France.\",\"variant\":\"numeric\",\"n_samples\":3,\"nli_pairs\":2,\"dry_run\":true}"
+```
+
+## API smoke tests
+
+```bash
+python -m unittest tests/test_uncertainty_service_api.py
+```
+
