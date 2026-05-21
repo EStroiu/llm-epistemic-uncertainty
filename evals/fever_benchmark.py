@@ -27,6 +27,11 @@ LABEL_SUPPORTS = "SUPPORTED"
 LABEL_REFUTES = "REFUTED"
 LABEL_NEI = "NOT_ENOUGH_INFO"
 
+LABEL_RE = re.compile(
+    r"\b(?:LABEL\s*[:=-]\s*)?(SUPPORTED|SUPPORTS|REFUTED|REFUTES|NOT[ _-]?ENOUGH[ _-]?INFO|NEI)\b",
+    re.IGNORECASE,
+)
+
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -46,20 +51,28 @@ def _normalize_label(text: str) -> str:
 
 
 def _extract_predicted_label(answer_text: str) -> str:
-    lines = [ln.strip() for ln in (answer_text or "").splitlines() if ln.strip()]
-    if lines:
-        first = lines[0]
-        m = re.search(r"(SUPPORTED|SUPPORTS|REFUTED|REFUTES|NOT[ _-]?ENOUGH[ _-]?INFO|NEI)", first, re.IGNORECASE)
-        if m:
-            return _normalize_label(m.group(1))
+    text = (answer_text or "").strip()
+    if not text:
+        return "UNKNOWN"
+
+    # Prefer an explicit LABEL line anywhere in the output.
+    m = re.search(r"LABEL\s*[:=-]\s*(SUPPORTED|SUPPORTS|REFUTED|REFUTES|NOT[ _-]?ENOUGH[ _-]?INFO|NEI)", text, re.IGNORECASE)
+    if m:
+        return _normalize_label(m.group(1))
+
+    # Fall back to the first label-like token anywhere in the answer.
+    m = LABEL_RE.search(text)
+    if m:
+        return _normalize_label(m.group(1))
+
     return _normalize_label(answer_text)
 
 
 def _build_prompt(claim: str) -> str:
     return (
-        "Task: classify the following factual claim into exactly one label: "
-        "SUPPORTED, REFUTED, or NOT_ENOUGH_INFO.\n"
-        "Output format strictly:\n"
+        "Classify the following factual claim into exactly one label: "
+        "SUPPORTED, REFUTED, or NOT_ENOUGH_INFO.\n\n"
+        "Return exactly two lines and nothing else:\n"
         "LABEL: <SUPPORTED|REFUTED|NOT_ENOUGH_INFO>\n"
         "REASON: <one short sentence>\n\n"
         f"CLAIM: {claim}"
@@ -463,6 +476,7 @@ def run_benchmark(args: argparse.Namespace) -> str:
                 "is_correct": is_correct,
                 "uncertainty": uncertainty,
                 "signal_granularity": args.granularity,
+                "finish_reason": result.get("finish_reason"),
                 "token_logprobs_available": result.get("provider_capabilities", {}).get("token_logprobs_available", False),
                 "num_claim_spans": len(result.get("claim_spans", []) or []),
                 "num_high_claims": sum(1 for c in (result.get("claim_spans", []) or []) if c.get("severity") == "high"),
@@ -538,7 +552,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--system", default="You are a careful fact-checking assistant.")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--num-runs", type=int, default=1)
-    parser.add_argument("--max-tokens", type=int, default=180)
+    parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--top-logprobs", type=int, default=5)
     parser.add_argument("--granularity", choices=["token", "word"], default="token", help="Score uncertainty per token or per word")
 

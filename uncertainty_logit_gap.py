@@ -170,6 +170,13 @@ def _extract_usage(response: Any) -> Any:
     return usage.model_dump() if hasattr(usage, "model_dump") else usage
 
 
+def _extract_finish_reason(response: Any) -> Optional[str]:
+    choices = _obj_get(response, "choices", [])
+    if not choices:
+        return None
+    return _obj_get(choices[0], "finish_reason", None)
+
+
 def _mean_optional(values: List[Optional[float]]) -> Optional[float]:
     cleaned = []
     for value in values:
@@ -492,6 +499,7 @@ def analyze_response_for_logit_gap_claims(
     return {
         "answer_text": text,
         "signal_granularity": (signal_granularity or "token").strip().lower(),
+        "finish_reason": _extract_finish_reason(response),
         "provider_capabilities": {
             "token_logprobs_available": has_token_scores,
             "requested_top_logprobs": requested_top_logprobs,
@@ -518,6 +526,8 @@ def run_logit_gap_claim_detection_live(
     temperature: float = 0.2,
     top_logprobs: int = 5,
     signal_granularity: str = "token",
+    retry_on_length: bool = True,
+    max_length_retries: int = 1,
 ) -> Dict[str, Any]:
     """
     Optional live execution using any OpenAI-compatible endpoint.
@@ -536,32 +546,47 @@ def run_logit_gap_claim_detection_live(
 
     # Some LiteLLM/OpenWebUI routes reject logprob params unless explicitly allow-listed.
     # If still unsupported, retry without logprobs so the run can continue in fallback mode.
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            logprobs=True,
-            top_logprobs=top_logprobs,
-            stream=False,
-            extra_body={"allowed_openai_params": ["logprobs", "top_logprobs"]},
-        )
-    except Exception:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stream=False,
-        )
+    def _create_chat_response(current_max_tokens: int) -> Any:
+        try:
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=current_max_tokens,
+                temperature=temperature,
+                logprobs=True,
+                top_logprobs=top_logprobs,
+                stream=False,
+                extra_body={"allowed_openai_params": ["logprobs", "top_logprobs"]},
+            )
+        except Exception:
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=current_max_tokens,
+                temperature=temperature,
+                stream=False,
+            )
 
+    response = _create_chat_response(max_tokens)
     analyzed = analyze_response_for_logit_gap_claims(
         response,
         requested_top_logprobs=top_logprobs,
         signal_granularity=signal_granularity,
     )
+
+    retry_count = 0
+    while retry_on_length and analyzed.get("finish_reason") == "length" and retry_count < max_length_retries:
+        retry_count += 1
+        max_tokens = min(max_tokens * 2, max_tokens + 512)
+        response = _create_chat_response(max_tokens)
+        analyzed = analyze_response_for_logit_gap_claims(
+            response,
+            requested_top_logprobs=top_logprobs,
+            signal_granularity=signal_granularity,
+        )
+
     if analyzed["provider_capabilities"]["token_logprobs_available"]:
+        analyzed["provider_capabilities"]["length_retries"] = retry_count
         return analyzed
 
     # Fallback attempt: some OpenAI-compatible backends only expose token logprobs
@@ -584,11 +609,13 @@ def run_logit_gap_claim_detection_live(
         if completion_analyzed["provider_capabilities"]["token_logprobs_available"]:
             completion_analyzed["provider_capabilities"]["signal_source"] = "token_logprobs_completions"
             completion_analyzed["provider_capabilities"]["chat_logprobs_unavailable"] = True
+            completion_analyzed["provider_capabilities"]["length_retries"] = retry_count
             return completion_analyzed
     except Exception:
         # Keep original chat response result if completions fallback fails.
         pass
 
+    analyzed["provider_capabilities"]["length_retries"] = retry_count
     return analyzed
 
 
