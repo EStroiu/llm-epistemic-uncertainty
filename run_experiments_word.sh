@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs the recommended experiment suite for logit-gap claim detection.
+# Runs the recommended experiment suite for logit-gap claim detection in word mode.
 # Usage:
-#   ./run_experiments.sh
+#   ./run_experiments_word.sh
 # Optional env overrides:
-#   MODEL="FAST.gpt-oss:120b" PROMPTS_FILE="prompts/basic_prompts.txt" RUNS=3 ./run_experiments.sh
+#   MODEL="FAST.gpt-oss:120b" PROMPTS_FILE="prompts/basic_prompts.txt" RUNS=3 ./run_experiments_word.sh
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
@@ -21,7 +21,7 @@ PROMPTS_FILE="${PROMPTS_FILE:-prompts/basic_prompts.txt}"
 TOP_LOGPROBS="${TOP_LOGPROBS:-5}"
 MAX_TOKENS="${MAX_TOKENS:-300}"
 RUNS="${RUNS:-10}"
-GRANULARITY="${GRANULARITY:-token}"
+GRANULARITY="${GRANULARITY:-word}"
 
 if [[ ! -f "$PROMPTS_FILE" ]]; then
   echo "Missing prompts file: $PROMPTS_FILE"
@@ -44,7 +44,7 @@ echo "[1/2] Main experiment (temperature sweep, repeated)"
   --top-logprobs "$TOP_LOGPROBS" \
   --max-tokens "$MAX_TOKENS" \
   --granularity "$GRANULARITY" \
-  --experiment-name "exp_main_temp_sweep"
+  --experiment-name "exp_main_temp_sweep_word"
 
 echo ""
 echo "[2/2] Deterministic run (T=0.0)"
@@ -56,7 +56,7 @@ echo "[2/2] Deterministic run (T=0.0)"
   --top-logprobs "$TOP_LOGPROBS" \
   --max-tokens "$MAX_TOKENS" \
   --granularity "$GRANULARITY" \
-  --experiment-name "exp_deterministic_t0"
+  --experiment-name "exp_deterministic_t0_word"
 
 echo ""
 echo "All experiments completed."

@@ -19,7 +19,7 @@ TEMPERATURE="${TEMPERATURE:-0.0}"
 TOP_LOGPROBS="${TOP_LOGPROBS:-5}"
 MAX_TOKENS="${MAX_TOKENS:-180}"
 SEED="${SEED:-42}"
-GRANULARITY="${GRANULARITY:-token}"
+GRANULARITY="${GRANULARITY:-word}"
 
 if [[ ! -d "$ROOT_DIR/external/fever" ]]; then
   echo "Note: FEVER submodule folder not found."

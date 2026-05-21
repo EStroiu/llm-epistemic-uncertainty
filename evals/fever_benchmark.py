@@ -447,6 +447,7 @@ def run_benchmark(args: argparse.Namespace) -> str:
                 max_tokens=args.max_tokens,
                 temperature=args.temperature,
                 top_logprobs=args.top_logprobs,
+                signal_granularity=args.granularity,
             )
 
             pred_label = _extract_predicted_label(result.get("answer_text", ""))
@@ -461,6 +462,7 @@ def run_benchmark(args: argparse.Namespace) -> str:
                 "pred_label": pred_label,
                 "is_correct": is_correct,
                 "uncertainty": uncertainty,
+                "signal_granularity": args.granularity,
                 "token_logprobs_available": result.get("provider_capabilities", {}).get("token_logprobs_available", False),
                 "num_claim_spans": len(result.get("claim_spans", []) or []),
                 "num_high_claims": sum(1 for c in (result.get("claim_spans", []) or []) if c.get("severity") == "high"),
@@ -511,6 +513,7 @@ def run_benchmark(args: argparse.Namespace) -> str:
         "num_runs": args.num_runs,
         "max_tokens": args.max_tokens,
         "top_logprobs": args.top_logprobs,
+        "signal_granularity": args.granularity,
         "base_url": args.base_url,
     }
     with open(os.path.join(run_dir, "run_config.json"), "w", encoding="utf-8") as f:
@@ -537,6 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-runs", type=int, default=1)
     parser.add_argument("--max-tokens", type=int, default=180)
     parser.add_argument("--top-logprobs", type=int, default=5)
+    parser.add_argument("--granularity", choices=["token", "word"], default="token", help="Score uncertainty per token or per word")
 
     parser.add_argument("--output-dir", default=os.path.join(ROOT_DIR, "experiments"))
     return parser

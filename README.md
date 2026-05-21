@@ -77,3 +77,42 @@ Outputs are saved under `experiments/fever_<config>_<split>_<timestamp>/`:
 	- `uncertainty_correct_vs_incorrect.pdf`
 	- `calibration_reliability.pdf`
 
+## Logit-Gap Experiments
+
+The main uncertainty experiments live in `uncertainty_logit_gap.py` and are usually launched through `run_experiments.sh`.
+
+Run the default token-level version:
+
+```bash
+chmod +x run_experiments.sh
+./run_experiments.sh
+```
+
+Run the same suite with word-level scoring instead:
+
+```bash
+GRANULARITY=word ./run_experiments.sh
+```
+
+Or use the dedicated wrapper:
+
+```bash
+chmod +x run_experiments_word.sh
+./run_experiments_word.sh
+```
+
+You can also call the Python script directly:
+
+```bash
+python uncertainty_logit_gap.py --prompts-file prompts/basic_prompts.txt --model FAST.gpt-oss:120b --granularity word
+```
+
+For FEVER, the word-level wrapper is:
+
+```bash
+chmod +x run_fever_benchmark_word.sh
+./run_fever_benchmark_word.sh
+```
+
+The saved artifacts are the same as before, but the confidence map and summary fields now reflect the chosen granularity so you can compare runs side by side.
+

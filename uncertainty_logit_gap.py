@@ -17,6 +17,7 @@ NUMBER_RE = re.compile(r"\b\d[\d,]*(?:\.\d+)?\b")
 DATE_RE = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:19|20)\d{2})\b")
 ENTITY_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b")
 SENTENCE_RE = re.compile(r"[^.!?]+(?:[.!?]+|$)", re.MULTILINE)
+WORD_RE = re.compile(r"\S+")
 NEBULA_BASE_URL = "https://nebula.cs.vu.nl/api/"
 
 
@@ -169,6 +170,20 @@ def _extract_usage(response: Any) -> Any:
     return usage.model_dump() if hasattr(usage, "model_dump") else usage
 
 
+def _mean_optional(values: List[Optional[float]]) -> Optional[float]:
+    cleaned = []
+    for value in values:
+        if value is None:
+            continue
+        numeric = float(value)
+        if math.isnan(numeric):
+            continue
+        cleaned.append(numeric)
+    if not cleaned:
+        return None
+    return sum(cleaned) / len(cleaned)
+
+
 def _compute_token_signals(token_infos: List[Any]) -> List[TokenSignal]:
     signals: List[TokenSignal] = []
     cursor = 0
@@ -229,6 +244,59 @@ def _compute_token_signals(token_infos: List[Any]) -> List[TokenSignal]:
         )
 
     return signals
+
+
+def _aggregate_signals_by_granularity(
+    signals: List[TokenSignal],
+    text: str,
+    granularity: str,
+) -> List[TokenSignal]:
+    normalized = (granularity or "token").strip().lower()
+    if normalized == "token":
+        return signals
+    if normalized != "word":
+        raise ValueError(f"Unsupported granularity: {granularity!r}. Expected 'token' or 'word'.")
+
+    aggregated: List[TokenSignal] = []
+    for m in WORD_RE.finditer(text):
+        start = m.start()
+        end = m.end()
+        span_tokens = [t for t in signals if t.end > start and t.start < end]
+        if not span_tokens:
+            aggregated.append(
+                TokenSignal(
+                    token=text[start:end],
+                    start=start,
+                    end=end,
+                    top1_logprob=float("nan"),
+                    top2_logprob=None,
+                    prob_gap=None,
+                    logprob_gap=None,
+                    entropy_topk=None,
+                )
+            )
+            continue
+
+        top1_vals = _mean_optional([t.top1_logprob for t in span_tokens])
+        top2_vals = _mean_optional([t.top2_logprob for t in span_tokens])
+        gap_vals = _mean_optional([t.prob_gap for t in span_tokens])
+        logprob_gap_vals = _mean_optional([t.logprob_gap for t in span_tokens])
+        entropy_vals = _mean_optional([t.entropy_topk for t in span_tokens])
+
+        aggregated.append(
+            TokenSignal(
+                token=text[start:end],
+                start=start,
+                end=end,
+                top1_logprob=top1_vals if top1_vals is not None else float("nan"),
+                top2_logprob=top2_vals,
+                prob_gap=gap_vals,
+                logprob_gap=logprob_gap_vals,
+                entropy_topk=entropy_vals,
+            )
+        )
+
+    return aggregated
 
 
 def _extract_claim_spans(text: str) -> List[Tuple[int, int, str, List[str]]]:
@@ -349,13 +417,23 @@ def _make_fragile_highlights(tokens: List[TokenSignal], claims: List[ClaimSpan])
     return highlights
 
 
-def analyze_response_for_logit_gap_claims(response: Any, *, requested_top_logprobs: int = 5) -> Dict[str, Any]:
+def analyze_response_for_logit_gap_claims(
+    response: Any,
+    *,
+    requested_top_logprobs: int = 5,
+    signal_granularity: str = "token",
+) -> Dict[str, Any]:
     """Analyze an OpenAI-compatible chat response object/dict for token- and claim-level fragility."""
     text = _extract_message_text(response)
     token_infos = _extract_token_logprobs(response)
 
     has_token_scores = len(token_infos) > 0
-    token_signals = _compute_token_signals(token_infos) if has_token_scores else []
+    raw_token_signals = _compute_token_signals(token_infos) if has_token_scores else []
+    token_signals = (
+        _aggregate_signals_by_granularity(raw_token_signals, text, signal_granularity)
+        if has_token_scores
+        else []
+    )
 
     claim_spans_raw = _extract_claim_spans(text)
     claim_spans = _aggregate_claim_scores(claim_spans_raw, token_signals) if has_token_scores else []
@@ -376,9 +454,11 @@ def analyze_response_for_logit_gap_claims(response: Any, *, requested_top_logpro
 
     return {
         "answer_text": text,
+        "signal_granularity": (signal_granularity or "token").strip().lower(),
         "provider_capabilities": {
             "token_logprobs_available": has_token_scores,
             "requested_top_logprobs": requested_top_logprobs,
+            "signal_granularity": (signal_granularity or "token").strip().lower(),
             "signal_source": "token_logprobs" if has_token_scores else "none",
             "fallback_recommended": not has_token_scores,
         },
@@ -400,6 +480,7 @@ def run_logit_gap_claim_detection_live(
     max_tokens: int = 220,
     temperature: float = 0.2,
     top_logprobs: int = 5,
+    signal_granularity: str = "token",
 ) -> Dict[str, Any]:
     """
     Optional live execution using any OpenAI-compatible endpoint.
@@ -438,7 +519,11 @@ def run_logit_gap_claim_detection_live(
             stream=False,
         )
 
-    analyzed = analyze_response_for_logit_gap_claims(response, requested_top_logprobs=top_logprobs)
+    analyzed = analyze_response_for_logit_gap_claims(
+        response,
+        requested_top_logprobs=top_logprobs,
+        signal_granularity=signal_granularity,
+    )
     if analyzed["provider_capabilities"]["token_logprobs_available"]:
         return analyzed
 
@@ -457,6 +542,7 @@ def run_logit_gap_claim_detection_live(
         completion_analyzed = analyze_response_for_logit_gap_claims(
             completion_response,
             requested_top_logprobs=top_logprobs,
+            signal_granularity=signal_granularity,
         )
         if completion_analyzed["provider_capabilities"]["token_logprobs_available"]:
             completion_analyzed["provider_capabilities"]["signal_source"] = "token_logprobs_completions"
@@ -476,6 +562,8 @@ def _pretty_print_result(result: Dict[str, Any]) -> None:
     caps = result["provider_capabilities"]
     print("\n=== Capabilities ===")
     print(caps)
+    granularity = str(result.get("signal_granularity", caps.get("signal_granularity", "token"))).strip().lower()
+    unit_label = "words" if granularity == "word" else "tokens"
 
     if caps["token_logprobs_available"]:
         print("\n=== Claim Fragility ===")
@@ -483,7 +571,7 @@ def _pretty_print_result(result: Dict[str, Any]) -> None:
             score = c["fragility_score"]
             score_txt = "None" if score is None else f"{score:.3f}"
             print(f"{i}. [{c['severity']}] score={score_txt} :: {c['text']}")
-        print("\n=== Highlights (fragile tokens) ===")
+        print(f"\n=== Highlights (fragile {unit_label}) ===")
         for h in result["highlights"][:25]:
             print(f"- {h['text']!r} ({h['start']},{h['end']}) {h['severity']}")
     else:
@@ -554,6 +642,7 @@ def _result_summary_row(
         "prompt_id": prompt_id,
         "model": model,
         "temperature": temperature,
+        "signal_granularity": result.get("signal_granularity", "token"),
         "token_logprobs_available": result.get("provider_capabilities", {}).get("token_logprobs_available", False),
         "answer_len_chars": len(result.get("answer_text", "")),
         "num_claim_spans": len(claim_spans),
@@ -691,6 +780,8 @@ def _gap_to_color(prob_gap: float) -> str:
 def _save_confidence_html(path: str, result: Dict[str, Any], prompt_text: str) -> None:
     answer_text = result.get("answer_text", "") or ""
     token_signals = result.get("token_signals", []) or []
+    granularity = str(result.get("signal_granularity", "token")).strip().lower()
+    unit_label = "Word" if granularity == "word" else "Token"
 
     if not answer_text:
         with open(path, "w", encoding="utf-8") as f:
@@ -793,7 +884,7 @@ def _save_confidence_html(path: str, result: Dict[str, Any], prompt_text: str) -
         <div class=\"answer\">{html.escape(prompt_text)}</div>
     </div>
   <div class=\"block\">
-    <h2>Token-level Confidence (green=more confident, red=less confident)</h2>
+        <h2>{unit_label}-level Confidence (green=more confident, red=less confident)</h2>
     <div class=\"answer\">{''.join(pieces)}</div>
   </div>
   <div class=\"block\">
@@ -826,6 +917,7 @@ def _run_batch_live(
     num_runs: int,
     max_tokens: int,
     top_logprobs: int,
+    signal_granularity: str,
 ) -> None:
     _ensure_dir(output_dir)
 
@@ -852,6 +944,7 @@ def _run_batch_live(
                     max_tokens=max_tokens,
                     temperature=temp,
                     top_logprobs=top_logprobs,
+                    signal_granularity=signal_granularity,
                 )
 
                 safe_temp = str(temp).replace(".", "_")
@@ -895,6 +988,7 @@ def _run_batch_live(
         "num_runs": num_runs,
         "max_tokens": max_tokens,
         "top_logprobs": top_logprobs,
+        "signal_granularity": signal_granularity,
     }
     _save_json(os.path.join(run_dir, "run_config.json"), config_json)
 
@@ -917,6 +1011,7 @@ def main() -> None:
     parser.add_argument("--temperatures", default="0.2", help="Comma-separated temperatures for batch mode, e.g. 0.0,0.2,0.5")
     parser.add_argument("--num-runs", type=int, default=1, help="Number of repeated runs per prompt/temperature in batch mode")
     parser.add_argument("--top-logprobs", type=int, default=5)
+    parser.add_argument("--granularity", choices=["token", "word"], default="token", help="Score uncertainty per token or per word")
     parser.add_argument("--prompts-file", help="Batch mode: .txt (one prompt per line) or .json (list of prompts)")
     parser.add_argument("--output-dir", default="experiments")
     parser.add_argument("--experiment-name", default="idea2_logit_gap")
@@ -953,13 +1048,18 @@ def main() -> None:
             num_runs=args.num_runs,
             max_tokens=args.max_tokens,
             top_logprobs=args.top_logprobs,
+            signal_granularity=args.granularity,
         )
         return
 
     if args.response_json:
         with open(args.response_json, "r", encoding="utf-8") as f:
             response = json.load(f)
-        result = analyze_response_for_logit_gap_claims(response, requested_top_logprobs=args.top_logprobs)
+        result = analyze_response_for_logit_gap_claims(
+            response,
+            requested_top_logprobs=args.top_logprobs,
+            signal_granularity=args.granularity,
+        )
     else:
         missing = []
         if not api_key:
@@ -984,6 +1084,7 @@ def main() -> None:
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             top_logprobs=args.top_logprobs,
+            signal_granularity=args.granularity,
         )
 
     _pretty_print_result(result)
