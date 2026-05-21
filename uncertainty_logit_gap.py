@@ -184,6 +184,34 @@ def _mean_optional(values: List[Optional[float]]) -> Optional[float]:
     return sum(cleaned) / len(cleaned)
 
 
+def _min_optional(values: List[Optional[float]]) -> Optional[float]:
+    cleaned = []
+    for value in values:
+        if value is None:
+            continue
+        numeric = float(value)
+        if math.isnan(numeric):
+            continue
+        cleaned.append(numeric)
+    if not cleaned:
+        return None
+    return min(cleaned)
+
+
+def _max_optional(values: List[Optional[float]]) -> Optional[float]:
+    cleaned = []
+    for value in values:
+        if value is None:
+            continue
+        numeric = float(value)
+        if math.isnan(numeric):
+            continue
+        cleaned.append(numeric)
+    if not cleaned:
+        return None
+    return max(cleaned)
+
+
 def _compute_token_signals(token_infos: List[Any]) -> List[TokenSignal]:
     signals: List[TokenSignal] = []
     cursor = 0
@@ -277,19 +305,28 @@ def _aggregate_signals_by_granularity(
             )
             continue
 
+        token_count = len(span_tokens)
         top1_vals = _mean_optional([t.top1_logprob for t in span_tokens])
         top2_vals = _mean_optional([t.top2_logprob for t in span_tokens])
-        gap_vals = _mean_optional([t.prob_gap for t in span_tokens])
-        logprob_gap_vals = _mean_optional([t.logprob_gap for t in span_tokens])
-        entropy_vals = _mean_optional([t.entropy_topk for t in span_tokens])
+        gap_vals = _min_optional([t.prob_gap for t in span_tokens])
+        logprob_gap_vals = _min_optional([t.logprob_gap for t in span_tokens])
+        entropy_vals = _max_optional([t.entropy_topk for t in span_tokens])
+
+        # Length-normalized word confidence keeps multi-token words comparable to single-token words.
+        word_top1_logprob = None
+        word_top2_logprob = None
+        if top1_vals is not None:
+            word_top1_logprob = top1_vals
+        if top2_vals is not None:
+            word_top2_logprob = top2_vals
 
         aggregated.append(
             TokenSignal(
                 token=text[start:end],
                 start=start,
                 end=end,
-                top1_logprob=top1_vals if top1_vals is not None else float("nan"),
-                top2_logprob=top2_vals,
+                top1_logprob=word_top1_logprob if word_top1_logprob is not None else float("nan"),
+                top2_logprob=word_top2_logprob,
                 prob_gap=gap_vals,
                 logprob_gap=logprob_gap_vals,
                 entropy_topk=entropy_vals,
