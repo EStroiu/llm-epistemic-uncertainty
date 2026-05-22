@@ -19,6 +19,9 @@ ENTITY_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b")
 SENTENCE_RE = re.compile(r"[^.!?]+(?:[.!?]+|$)", re.MULTILINE)
 WORD_RE = re.compile(r"\S+")
 NEBULA_BASE_URL = "https://nebula.cs.vu.nl/api/"
+FORMAT_TOKEN_RE = re.compile(r"^\s*(LABEL|REASON)\b", re.IGNORECASE)
+PUNCT_ONLY_RE = re.compile(r"^[\W_]+$")
+LABEL_WORDS = {"SUPPORTED", "REFUTED", "NOT_ENOUGH_INFO", "NEI", "SUPPORTS", "REFUTES"}
 
 
 @dataclass
@@ -191,6 +194,19 @@ def _mean_optional(values: List[Optional[float]]) -> Optional[float]:
     return sum(cleaned) / len(cleaned)
 
 
+def _is_format_or_punct(token: str) -> bool:
+    s = token.strip()
+    if not s:
+        return True
+    if FORMAT_TOKEN_RE.match(s):
+        return True
+    if PUNCT_ONLY_RE.match(s):
+        return True
+    if s.upper() in LABEL_WORDS:
+        return True
+    return False
+
+
 def _min_optional(values: List[Optional[float]]) -> Optional[float]:
     cleaned = []
     for value in values:
@@ -297,6 +313,12 @@ def _aggregate_signals_by_granularity(
         start = m.start()
         end = m.end()
         span_tokens = [t for t in signals if t.end > start and t.start < end]
+        # Filter out formatting tokens (e.g. 'LABEL', 'REASON') and punctuation-only tokens
+        filtered_span_tokens = [t for t in span_tokens if not _is_format_or_punct(t.token)]
+        if filtered_span_tokens:
+            use_tokens = filtered_span_tokens
+        else:
+            use_tokens = span_tokens
         if not span_tokens:
             aggregated.append(
                 TokenSignal(
@@ -312,12 +334,12 @@ def _aggregate_signals_by_granularity(
             )
             continue
 
-        token_count = len(span_tokens)
-        top1_vals = _mean_optional([t.top1_logprob for t in span_tokens])
-        top2_vals = _mean_optional([t.top2_logprob for t in span_tokens])
-        gap_vals = _min_optional([t.prob_gap for t in span_tokens])
-        logprob_gap_vals = _min_optional([t.logprob_gap for t in span_tokens])
-        entropy_vals = _max_optional([t.entropy_topk for t in span_tokens])
+        token_count = len(use_tokens)
+        top1_vals = _mean_optional([t.top1_logprob for t in use_tokens])
+        top2_vals = _mean_optional([t.top2_logprob for t in use_tokens])
+        gap_vals = _min_optional([t.prob_gap for t in use_tokens])
+        logprob_gap_vals = _min_optional([t.logprob_gap for t in use_tokens])
+        entropy_vals = _max_optional([t.entropy_topk for t in use_tokens])
 
         # Length-normalized word confidence keeps multi-token words comparable to single-token words.
         word_top1_logprob = None
@@ -841,11 +863,40 @@ def _gap_to_color(prob_gap: float) -> str:
     return f"rgb({r},{gg},{b})"
 
 
-def _save_confidence_html(path: str, result: Dict[str, Any], prompt_text: str) -> None:
+def _save_confidence_html(
+    path: str,
+    result: Dict[str, Any],
+    prompt_text: str,
+    display_granularity: Optional[str] = None,
+) -> None:
     answer_text = result.get("answer_text", "") or ""
-    token_signals = result.get("token_signals", []) or []
-    granularity = str(result.get("signal_granularity", "token")).strip().lower()
+    token_signal_dicts = result.get("token_signals", []) or []
+    raw_token_signals: List[TokenSignal] = []
+    for t in token_signal_dicts:
+        if not isinstance(t, dict):
+            continue
+        raw_token_signals.append(
+            TokenSignal(
+                token=str(t.get("token", "") or ""),
+                start=int(t.get("start", -1)),
+                end=int(t.get("end", -1)),
+                top1_logprob=float(t.get("top1_logprob", float("nan"))),
+                top2_logprob=t.get("top2_logprob"),
+                prob_gap=t.get("prob_gap"),
+                logprob_gap=t.get("logprob_gap"),
+                entropy_topk=t.get("entropy_topk"),
+            )
+        )
+    granularity = str(
+        display_granularity or result.get("display_granularity") or result.get("signal_granularity", "token")
+    ).strip().lower()
     unit_label = "Word" if granularity == "word" else "Token"
+
+    display_signals = (
+        _aggregate_signals_by_granularity(raw_token_signals, answer_text, granularity)
+        if raw_token_signals
+        else []
+    )
 
     if not answer_text:
         with open(path, "w", encoding="utf-8") as f:
@@ -860,10 +911,10 @@ def _save_confidence_html(path: str, result: Dict[str, Any], prompt_text: str) -
             continue
         s, e = m.start(), m.end()
         gaps = []
-        for t in token_signals:
-            ts = int(t.get("start", -1))
-            te = int(t.get("end", -1))
-            gp = t.get("prob_gap")
+        for t in display_signals:
+            ts = int(t.start)
+            te = int(t.end)
+            gp = t.prob_gap
             if gp is None:
                 continue
             if te > s and ts < e:
@@ -874,10 +925,10 @@ def _save_confidence_html(path: str, result: Dict[str, Any], prompt_text: str) -
     # Inline token confidence rendering.
     pieces: List[str] = []
     cursor = 0
-    sorted_tokens = sorted(token_signals, key=lambda x: int(x.get("start", -1)))
+    sorted_tokens = sorted(display_signals, key=lambda x: int(x.start))
     for t in sorted_tokens:
-        start = int(t.get("start", -1))
-        end = int(t.get("end", -1))
+        start = int(t.start)
+        end = int(t.end)
         if start < 0 or end <= start:
             continue
         if start >= len(answer_text):
@@ -891,7 +942,7 @@ def _save_confidence_html(path: str, result: Dict[str, Any], prompt_text: str) -
             pieces.append(html.escape(answer_text[cursor:start]))
 
         token_txt = answer_text[start:end]
-        gap = t.get("prob_gap")
+        gap = t.prob_gap
         if gap is None:
             pieces.append(html.escape(token_txt))
         else:
@@ -982,6 +1033,7 @@ def _run_batch_live(
     max_tokens: int,
     top_logprobs: int,
     signal_granularity: str,
+    display_granularity: str,
 ) -> None:
     _ensure_dir(output_dir)
 
@@ -1022,7 +1074,12 @@ def _run_batch_live(
                     sentence_dir,
                     f"confidence_run{run_idx:02d}_prompt{p_idx:03d}_t{safe_temp}.html",
                 )
-                _save_confidence_html(confidence_html, result, prompt)
+                _save_confidence_html(
+                    confidence_html,
+                    result,
+                    prompt,
+                    display_granularity=display_granularity,
+                )
 
                 row = _result_summary_row(
                     run_id=run_id,
@@ -1053,6 +1110,7 @@ def _run_batch_live(
         "max_tokens": max_tokens,
         "top_logprobs": top_logprobs,
         "signal_granularity": signal_granularity,
+        "display_granularity": display_granularity,
     }
     _save_json(os.path.join(run_dir, "run_config.json"), config_json)
 
@@ -1076,6 +1134,12 @@ def main() -> None:
     parser.add_argument("--num-runs", type=int, default=1, help="Number of repeated runs per prompt/temperature in batch mode")
     parser.add_argument("--top-logprobs", type=int, default=5)
     parser.add_argument("--granularity", choices=["token", "word"], default="token", help="Score uncertainty per token or per word")
+    parser.add_argument(
+        "--display-granularity",
+        choices=["token", "word"],
+        default="word",
+        help="Granularity used for confidence-map visualization",
+    )
     parser.add_argument("--prompts-file", help="Batch mode: .txt (one prompt per line) or .json (list of prompts)")
     parser.add_argument("--output-dir", default="experiments")
     parser.add_argument("--experiment-name", default="idea2_logit_gap")
@@ -1113,6 +1177,7 @@ def main() -> None:
             max_tokens=args.max_tokens,
             top_logprobs=args.top_logprobs,
             signal_granularity=args.granularity,
+            display_granularity=args.display_granularity,
         )
         return
 

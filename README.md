@@ -56,9 +56,11 @@ git submodule update --init --recursive
 Run the FEVER uncertainty benchmark:
 
 ```bash
-chmod +x run_fever_benchmark.sh
-./run_fever_benchmark.sh
+chmod +x scripts/run_fever_benchmark.sh
+./scripts/run_fever_benchmark.sh
 ```
+
+By default this uses a 256-token generation budget and a composite uncertainty score that combines claim fragility, REASON-line fragility, and a format penalty.
 
 Useful overrides:
 
@@ -84,35 +86,45 @@ The main uncertainty experiments live in `uncertainty_logit_gap.py` and are usua
 Run the default token-level version:
 
 ```bash
-chmod +x run_experiments.sh
-./run_experiments.sh
+chmod +x scripts/run_experiments.sh
+./scripts/run_experiments.sh
 ```
 
-Run the same suite with word-level scoring instead:
+This keeps uncertainty scoring on tokens, but the confidence map is rendered at word-level by default for easier reading.
+
+If you want to override the display granularity, set `DISPLAY_GRANULARITY`:
 
 ```bash
-GRANULARITY=word ./run_experiments.sh
+DISPLAY_GRANULARITY=token ./scripts/run_experiments.sh
 ```
 
-Or use the dedicated wrapper:
+You can still force word scoring if you want to compare against the older behavior:
 
 ```bash
-chmod +x run_experiments_word.sh
-./run_experiments_word.sh
+GRANULARITY=word DISPLAY_GRANULARITY=word ./scripts/run_experiments.sh
 ```
 
-You can also call the Python script directly:
+The same split applies to FEVER:
 
 ```bash
-python uncertainty_logit_gap.py --prompts-file prompts/basic_prompts.txt --model FAST.gpt-oss:120b --granularity word
+chmod +x scripts/run_fever_benchmark.sh
+./scripts/run_fever_benchmark.sh
 ```
 
-For FEVER, the word-level wrapper is:
+Recommended hybrid mode for interpretability:
 
 ```bash
-chmod +x run_fever_benchmark_word.sh
-./run_fever_benchmark_word.sh
+GRANULARITY=token DISPLAY_GRANULARITY=word ./scripts/run_fever_benchmark.sh
 ```
 
-The saved artifacts are the same as before, but the confidence map and summary fields now reflect the chosen granularity so you can compare runs side by side.
+The dedicated `*_word.sh` wrappers now mean word-level visualization with token-level scoring under the hood.
+
+If you want to try the simpler experimental scorer, use:
+
+```bash
+chmod +x scripts/run_fever_benchmark_simple.sh
+./scripts/run_fever_benchmark_simple.sh
+```
+
+This variant keeps the same FEVER setup but uses a more interpretable max-based uncertainty score and reports filtered metrics as well.
 
