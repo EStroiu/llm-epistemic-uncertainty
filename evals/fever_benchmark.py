@@ -79,21 +79,102 @@ def _build_prompt(claim: str) -> str:
     )
 
 
+def _span_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    return a_end > b_start and a_start < b_end
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _mean(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _reason_line_uncertainty(answer_text: str, token_signals: List[Dict[str, Any]]) -> Optional[float]:
+    reason_match = re.search(r"^\s*REASON\s*:\s*(.+)$", answer_text, re.IGNORECASE | re.MULTILINE)
+    if not reason_match:
+        return None
+
+    rs, re_end = reason_match.start(1), reason_match.end(1)
+    gaps: List[float] = []
+    for t in token_signals:
+        gp = t.get("prob_gap")
+        if gp is None:
+            continue
+        ts = int(t.get("start", -1))
+        te = int(t.get("end", -1))
+        if _span_overlap(ts, te, rs, re_end):
+            token_text = str(t.get("token", "") or "").strip()
+            if not token_text:
+                continue
+            if re.fullmatch(r"[\W_]+", token_text):
+                continue
+            if token_text.upper() in {"LABEL", "REASON", "SUPPORTED", "REFUTED", "NOT_ENOUGH_INFO", "NEI"}:
+                continue
+            gaps.append(float(gp))
+
+    if not gaps:
+        return None
+
+    gaps_sorted = sorted(gaps)
+    trim = max(0, len(gaps_sorted) // 10)
+    if trim > 0 and len(gaps_sorted) > 2 * trim:
+        gaps_sorted = gaps_sorted[trim:-trim]
+
+    mean_gap = _mean(gaps_sorted)
+    if mean_gap is None:
+        return None
+    return _clamp01(1.0 - mean_gap)
+
+
+def _format_penalty(answer_text: str, pred_label: str, finish_reason: Optional[str]) -> float:
+    penalty = 0.0
+    text = answer_text or ""
+
+    if str(finish_reason or "").lower() == "length":
+        penalty = max(penalty, 1.0)
+
+    if not re.search(r"^\s*LABEL\s*[:=-]\s*(SUPPORTED|SUPPORTS|REFUTED|REFUTES|NOT[ _-]?ENOUGH[ _-]?INFO|NEI)\b", text, re.IGNORECASE | re.MULTILINE):
+        penalty = max(penalty, 0.35)
+
+    if not re.search(r"^\s*REASON\s*:\s*.+", text, re.IGNORECASE | re.MULTILINE):
+        penalty = max(penalty, 0.35)
+
+    if pred_label == "UNKNOWN":
+        penalty = max(penalty, 0.6)
+
+    return penalty
+
+
 def _sample_uncertainty(result: Dict[str, Any]) -> Optional[float]:
+    # If output was cut off by max_tokens, treat it as maximally uncertain.
+    if str(result.get("finish_reason", "")).lower() == "length":
+        return 1.0
+
     claim_spans = result.get("claim_spans", []) or []
-    fragility = [c.get("fragility_score") for c in claim_spans if c.get("fragility_score") is not None]
-    if fragility:
-        v = sum(float(x) for x in fragility) / len(fragility)
-        return max(0.0, min(1.0, v))
+    fragility = [float(c.get("fragility_score")) for c in claim_spans if c.get("fragility_score") is not None]
+    claim_uncertainty = _mean([_clamp01(v) for v in fragility])
 
+    answer_text = str(result.get("answer_text", "") or "")
     token_signals = result.get("token_signals", []) or []
-    gaps = [t.get("prob_gap") for t in token_signals if t.get("prob_gap") is not None]
-    if gaps:
-        mean_gap = sum(float(x) for x in gaps) / len(gaps)
-        v = 1.0 - max(0.0, min(1.0, mean_gap))
-        return max(0.0, min(1.0, v))
+    reason_uncertainty = _reason_line_uncertainty(answer_text, token_signals)
 
-    return None
+    pred_label = str(result.get("pred_label", result.get("prediction", {}).get("label", "")) or "").upper()
+    format_penalty = _format_penalty(answer_text, pred_label, result.get("finish_reason"))
+
+    components = [v for v in [claim_uncertainty, reason_uncertainty] if v is not None]
+    if components:
+        content_uncertainty = max(components)
+    else:
+        content_uncertainty = None
+
+    if content_uncertainty is None:
+        content_uncertainty = 0.0
+
+    return _clamp01(max(content_uncertainty, format_penalty))
 
 
 def _compute_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -501,7 +582,12 @@ def run_benchmark(args: argparse.Namespace) -> str:
                 json.dump(record, f, ensure_ascii=False, indent=2)
 
             html_name = f"confidence_run{run_idx:02d}_id{sample['id']}.html"
-            _save_confidence_html(os.path.join(sentence_dir, html_name), result, prompt)
+            _save_confidence_html(
+                os.path.join(sentence_dir, html_name),
+                result,
+                prompt,
+                display_granularity=getattr(args, "display_granularity", "word"),
+            )
 
             print(
                 f"[saved] run={run_idx} sample={i}/{len(fever_rows)} id={sample['id']} "
@@ -555,6 +641,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--top-logprobs", type=int, default=5)
     parser.add_argument("--granularity", choices=["token", "word"], default="token", help="Score uncertainty per token or per word")
+    parser.add_argument(
+        "--display-granularity",
+        choices=["token", "word"],
+        default="word",
+        help="Granularity used for confidence-map visualization",
+    )
 
     parser.add_argument("--output-dir", default=os.path.join(ROOT_DIR, "experiments"))
     return parser
