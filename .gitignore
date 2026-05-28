@@ -14,6 +14,7 @@ uncertainty/
 
 ### Experiment artifacts
 experiments/
+outputs/
 
 ### Editors / OS
 .vscode/

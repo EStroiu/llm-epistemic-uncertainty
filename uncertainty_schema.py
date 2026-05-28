@@ -72,17 +72,20 @@ def build_uncertainty_payload(
     *,
     content: str,
     estimators: List[EstimatorOutput],
+    claims: Optional[List[Dict[str, Any]]] = None,
     prompt_variant: Optional[str] = None,
     expression: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     summary = combine_estimators(estimators)
     metadata = metadata or {}
+    claims = claims or []
 
     return {
         "schema_version": SCHEMA_VERSION,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "content": content,
+        "claims": claims,
         "uncertainty": {
             "overall_uncertainty": summary["overall_uncertainty"],
             "overall_confidence": summary["overall_confidence"],

@@ -25,9 +25,21 @@ class TestUncertaintySchema(unittest.TestCase):
         )
         self.assertIn("schema_version", payload)
         self.assertIn("uncertainty", payload)
+        self.assertIn("claims", payload)
         self.assertEqual(payload["content"], "Some answer")
+        self.assertEqual(payload["claims"], [])
         self.assertEqual(payload["uncertainty"]["prompt_variant"], "v1")
         self.assertEqual(payload["metadata"]["sample_id"], "x-1")
+
+    def test_payload_accepts_claims(self) -> None:
+        payload = build_uncertainty_payload(
+            content="Some answer",
+            estimators=[EstimatorOutput(name="demo", uncertainty=0.1, confidence=0.9)],
+            claims=[{"claim_id": "c1", "text": "Some answer.", "uncertainty": 0.1, "certainty": 0.9}],
+        )
+
+        self.assertEqual(payload["claims"][0]["claim_id"], "c1")
+        self.assertAlmostEqual(payload["claims"][0]["certainty"], 0.9)
 
     def test_logit_gap_adapter_includes_unified_payload(self) -> None:
         response = {
@@ -64,6 +76,8 @@ class TestUncertaintySchema(unittest.TestCase):
             result["uncertainty_payload"]["uncertainty"]["estimators"][0]["name"],
             "logit_gap_fragility",
         )
+        self.assertIn("claims", result["uncertainty_payload"])
+        self.assertEqual(result["uncertainty_payload"]["claims"][0]["text"], "Paris is the capital of France.")
 
 
 if __name__ == "__main__":

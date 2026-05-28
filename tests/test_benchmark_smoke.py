@@ -1,3 +1,5 @@
+import csv
+import json
 import os
 import shutil
 import tempfile
@@ -26,6 +28,23 @@ class TestBenchmarkSmoke(unittest.TestCase):
             self.assertEqual(metrics["num_examples"], 3)
             self.assertIn("error_detection_auroc", metrics)
             self.assertIn("avg_clarity_score", metrics)
+            self.assertIn("avg_num_claims", metrics)
+            self.assertIn("avg_mean_claim_uncertainty", metrics)
+            self.assertIn("total_claim_contradictions", metrics)
+
+            run_dir = os.path.join(temp_dir, metrics["run_id"])
+            with open(os.path.join(run_dir, "summary.csv"), newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(len(rows), 3)
+            self.assertIn("num_claims", rows[0])
+            self.assertIn("mean_claim_uncertainty", rows[0])
+            self.assertIn("max_claim_uncertainty", rows[0])
+            self.assertIn("min_claim_certainty", rows[0])
+
+            with open(os.path.join(run_dir, "examples", "example_0001.json"), encoding="utf-8") as f:
+                example = json.load(f)
+            self.assertIn("claim_uncertainties", example)
+            self.assertIn("claims", example["uncertainty_payload"])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

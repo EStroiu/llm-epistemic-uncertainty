@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -45,6 +45,13 @@ DASHBOARD_HTML = """
 
     <div class="grid">
       <div>
+        <label for="mode" title="Use freeform for normal prompts, claim_verification for FEVER-style labels.">Mode</label>
+        <select id="mode">
+          <option>freeform</option>
+          <option>claim_verification</option>
+        </select>
+      </div>
+      <div>
         <label for="variant" title="Prompt style for uncertainty expression (none, brief, numeric, calibrated).">Variant</label>
         <select id="variant">
           <option>numeric</option>
@@ -72,6 +79,10 @@ DASHBOARD_HTML = """
       <div>
         <label for="prob_temperature" title="Randomness for label-probability estimation (usually keep at 0.0).">prob_temperature</label>
         <input id="prob_temperature" type="number" min="0" max="2" step="0.1" value="0.0" />
+      </div>
+      <div>
+        <label for="top_logprobs" title="Number of token alternatives requested for logit-gap scoring.">top_logprobs</label>
+        <input id="top_logprobs" type="number" min="1" max="20" value="5" />
       </div>
     </div>
     <label title="Uses mock data only; no real Nebula call and no API cost."><input id="dry_run" type="checkbox" checked /> dry_run (no Nebula call)</label>
@@ -104,11 +115,13 @@ DASHBOARD_HTML = """
       const payload = {
         query: document.getElementById("query").value,
         model: document.getElementById("model").value,
+        mode: document.getElementById("mode").value,
         variant: document.getElementById("variant").value,
         n_samples: Number(document.getElementById("n_samples").value),
         nli_pairs: Number(document.getElementById("nli_pairs").value),
         sample_temperature: Number(document.getElementById("sample_temperature").value),
         prob_temperature: Number(document.getElementById("prob_temperature").value),
+        top_logprobs: Number(document.getElementById("top_logprobs").value),
         dry_run: document.getElementById("dry_run").checked
       };
 
@@ -148,11 +161,13 @@ DASHBOARD_HTML = """
 class InferRequest(BaseModel):
     query: str = Field(..., description="Claim or user query to evaluate.")
     model: str = Field(default="FAST.gpt-oss:120b")
+    mode: str = Field(default="claim_verification", description="claim_verification|freeform")
     variant: str = Field(default="numeric", description="none|brief|numeric|calibrated")
     n_samples: int = Field(default=4, ge=1, le=10)
     nli_pairs: int = Field(default=2, ge=0, le=20)
     sample_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     prob_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    top_logprobs: int = Field(default=5, ge=1, le=20)
     dry_run: bool = Field(default=False, description="True = do not call Nebula API")
 
 
@@ -160,6 +175,7 @@ class InferResponse(BaseModel):
     schema_version: str
     timestamp_utc: str
     content: str
+    claims: List[Dict[str, Any]]
     uncertainty: Dict[str, Any]
     metadata: Dict[str, Any]
 
@@ -180,11 +196,13 @@ def infer(request: InferRequest) -> Dict[str, Any]:
         return infer_uncertainty(
             query=request.query,
             model=request.model,
+            mode=request.mode,
             variant=request.variant,
             n_samples=request.n_samples,
             nli_pairs=request.nli_pairs,
             sample_temperature=request.sample_temperature,
             prob_temperature=request.prob_temperature,
+            top_logprobs=request.top_logprobs,
             dry_run=request.dry_run,
         )
     except ValueError as exc:

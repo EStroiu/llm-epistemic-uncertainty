@@ -14,6 +14,7 @@ except Exception:  # allows running tests without optional deps installed global
     def load_dotenv() -> bool:
         return False
 
+from claim_extraction import AtomicClaim, extract_atomic_claims
 from uncertainty_schema import EstimatorOutput, build_uncertainty_payload
 
 
@@ -211,36 +212,52 @@ def _severity_from_fragility(score: Optional[float]) -> str:
     return "low"
 
 
+def _span_logit_metrics(tokens: List[TokenSignal], start: int, end: int) -> Dict[str, Any]:
+    span_tokens = _tokens_in_span(tokens, start, end)
+    gaps = [t.prob_gap for t in span_tokens if t.prob_gap is not None]
+    ents = [t.entropy_topk for t in span_tokens if t.entropy_topk is not None]
+
+    min_gap = min(gaps) if gaps else None
+    mean_gap = sum(gaps) / len(gaps) if gaps else None
+    mean_ent = sum(ents) / len(ents) if ents else None
+
+    # Simple fragility score in [0, 1] (approx):
+    # - lower gap => more fragile
+    # - higher top-k entropy => more fragile (normalized by ln(k), approximated with ln(5))
+    fragility: Optional[float] = None
+    if mean_gap is not None or mean_ent is not None:
+        gap_component = 1.0 - (mean_gap if mean_gap is not None else 0.5)
+        ent_norm = 0.0
+        if mean_ent is not None:
+            ent_norm = min(1.0, max(0.0, mean_ent / math.log(5.0)))
+        fragility = max(0.0, min(1.0, 0.65 * gap_component + 0.35 * ent_norm))
+
+    severity = _severity_from_fragility(fragility)
+    # Escalate if very low minimum gap appears inside the claim
+    if min_gap is not None and min_gap < 0.1:
+        severity = "high"
+    elif min_gap is not None and min_gap < 0.2 and severity == "low":
+        severity = "medium"
+
+    confidence = (1.0 - fragility) if fragility is not None else None
+
+    return {
+        "token_count": len(span_tokens),
+        "min_prob_gap": min_gap,
+        "mean_prob_gap": mean_gap,
+        "mean_entropy_topk": mean_ent,
+        "logit_fragility": fragility,
+        "logit_uncertainty": fragility,
+        "logit_confidence": confidence,
+        "severity": severity,
+    }
+
+
 def _aggregate_claim_scores(claims: List[Tuple[int, int, str, List[str]]], tokens: List[TokenSignal]) -> List[ClaimSpan]:
     result: List[ClaimSpan] = []
 
     for start, end, claim_text, reasons in claims:
-        claim_tokens = _tokens_in_span(tokens, start, end)
-
-        gaps = [t.prob_gap for t in claim_tokens if t.prob_gap is not None]
-        ents = [t.entropy_topk for t in claim_tokens if t.entropy_topk is not None]
-
-        min_gap = min(gaps) if gaps else None
-        mean_gap = sum(gaps) / len(gaps) if gaps else None
-        mean_ent = sum(ents) / len(ents) if ents else None
-
-        # Simple fragility score in [0, 1] (approx):
-        # - lower gap => more fragile
-        # - higher top-k entropy => more fragile (normalized by ln(k), approximated with ln(5))
-        fragility: Optional[float] = None
-        if mean_gap is not None or mean_ent is not None:
-            gap_component = 1.0 - (mean_gap if mean_gap is not None else 0.5)
-            ent_norm = 0.0
-            if mean_ent is not None:
-                ent_norm = min(1.0, max(0.0, mean_ent / math.log(5.0)))
-            fragility = max(0.0, min(1.0, 0.65 * gap_component + 0.35 * ent_norm))
-
-        severity = _severity_from_fragility(fragility)
-        # Escalate if very low minimum gap appears inside the claim
-        if min_gap is not None and min_gap < 0.1:
-            severity = "high"
-        elif min_gap is not None and min_gap < 0.2 and severity == "low":
-            severity = "medium"
+        metrics = _span_logit_metrics(tokens, start, end)
 
         result.append(
             ClaimSpan(
@@ -248,15 +265,24 @@ def _aggregate_claim_scores(claims: List[Tuple[int, int, str, List[str]]], token
                 start=start,
                 end=end,
                 reason=reasons,
-                min_prob_gap=min_gap,
-                mean_prob_gap=mean_gap,
-                mean_entropy_topk=mean_ent,
-                fragility_score=fragility,
-                severity=severity,
+                min_prob_gap=metrics["min_prob_gap"],
+                mean_prob_gap=metrics["mean_prob_gap"],
+                mean_entropy_topk=metrics["mean_entropy_topk"],
+                fragility_score=metrics["logit_fragility"],
+                severity=metrics["severity"],
             )
         )
 
     return result
+
+
+def _score_atomic_claims(claims: List[AtomicClaim], tokens: List[TokenSignal]) -> List[Dict[str, Any]]:
+    scored: List[Dict[str, Any]] = []
+    for claim in claims:
+        payload = claim.to_dict()
+        payload.update(_span_logit_metrics(tokens, claim.start, claim.end))
+        scored.append(payload)
+    return scored
 
 
 def _make_fragile_highlights(tokens: List[TokenSignal], claims: List[ClaimSpan]) -> List[Highlight]:
@@ -294,6 +320,22 @@ def analyze_response_for_logit_gap_claims(response: Any, *, requested_top_logpro
 
     has_token_scores = len(token_infos) > 0
     token_signals = _compute_token_signals(token_infos) if has_token_scores else []
+
+    atomic_claim_candidates = extract_atomic_claims(text)
+    atomic_claims = _score_atomic_claims(atomic_claim_candidates, token_signals) if has_token_scores else [
+        {
+            **claim.to_dict(),
+            "token_count": 0,
+            "min_prob_gap": None,
+            "mean_prob_gap": None,
+            "mean_entropy_topk": None,
+            "logit_fragility": None,
+            "logit_uncertainty": None,
+            "logit_confidence": None,
+            "severity": "unknown",
+        }
+        for claim in atomic_claim_candidates
+    ]
 
     claim_spans_raw = _extract_claim_spans(text)
     claim_spans = _aggregate_claim_scores(claim_spans_raw, token_signals) if has_token_scores else []
@@ -336,6 +378,7 @@ def analyze_response_for_logit_gap_claims(response: Any, *, requested_top_logpro
         confidence=1.0 - overall_uncertainty,
         details={
             "token_logprobs_available": has_token_scores,
+            "num_atomic_claims": len(atomic_claims),
             "num_claim_spans": len(claim_spans),
             "num_highlights": len(highlights),
             "mean_claim_fragility": mean_claim_fragility,
@@ -347,11 +390,13 @@ def analyze_response_for_logit_gap_claims(response: Any, *, requested_top_logpro
     uncertainty_payload = build_uncertainty_payload(
         content=text,
         estimators=[estimator],
+        claims=atomic_claims,
         prompt_variant="default",
         expression="metadata_only",
         metadata={
             "source": "uncertainty_logit_gap.py",
             "requested_top_logprobs": requested_top_logprobs,
+            "atomic_claims": atomic_claims,
         },
     )
 
@@ -365,6 +410,7 @@ def analyze_response_for_logit_gap_claims(response: Any, *, requested_top_logpro
         },
         "usage": _extract_usage(response),
         "token_signals": [asdict(t) for t in token_signals],
+        "atomic_claims": atomic_claims,
         "claim_spans": [asdict(c) for c in claim_spans],
         "highlights": [asdict(h) for h in highlights],
         "fallback_claim_candidates": fallback_claim_candidates,

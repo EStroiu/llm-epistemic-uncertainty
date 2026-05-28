@@ -11,6 +11,9 @@ try:
 except Exception:
     def load_dotenv() -> bool:
         return False
+from claim_extraction import extract_atomic_claims
+from claim_judging import judge_claim_against_answer
+from claim_uncertainty import build_claim_consistency_estimator, summarize_claim_uncertainties
 from uncertainty_estimators import (
     FEVER_LABELS,
     estimate_nli_consistency,
@@ -227,6 +230,42 @@ def expected_calibration_error(conf: Sequence[float], correct: Sequence[int], bi
     return ece
 
 
+def _mean(values: Sequence[float]) -> Optional[float]:
+    return (sum(values) / len(values)) if values else None
+
+
+def _claim_summary_stats(claim_uncertainties: List[Dict[str, Any]]) -> Dict[str, Any]:
+    final_vals = [
+        float(c["final_uncertainty"])
+        for c in claim_uncertainties
+        if c.get("final_uncertainty") is not None
+    ]
+    semantic_vals = [
+        float(c["semantic_uncertainty"])
+        for c in claim_uncertainties
+        if c.get("semantic_uncertainty") is not None
+    ]
+    certainty_vals = [
+        float(c["final_certainty"])
+        for c in claim_uncertainties
+        if c.get("final_certainty") is not None
+    ]
+
+    return {
+        "num_claims": len(claim_uncertainties),
+        "mean_claim_uncertainty": _mean(final_vals),
+        "max_claim_uncertainty": max(final_vals) if final_vals else None,
+        "min_claim_certainty": min(certainty_vals) if certainty_vals else None,
+        "mean_semantic_uncertainty": _mean(semantic_vals),
+        "total_claim_supports": sum(int(c.get("support_count", 0)) for c in claim_uncertainties),
+        "total_claim_contradictions": sum(int(c.get("contradiction_count", 0)) for c in claim_uncertainties),
+        "total_claim_not_addressed": sum(int(c.get("not_addressed_count", 0)) for c in claim_uncertainties),
+        "num_high_claims": sum(1 for c in claim_uncertainties if c.get("severity") == "high"),
+        "num_medium_claims": sum(1 for c in claim_uncertainties if c.get("severity") == "medium"),
+        "num_low_claims": sum(1 for c in claim_uncertainties if c.get("severity") == "low"),
+    }
+
+
 def run_benchmark(
     *,
     dataset_path: str,
@@ -265,6 +304,13 @@ def run_benchmark(
     all_correct: List[int] = []
     clarity_vals: List[float] = []
     interp_vals: List[float] = []
+    claim_count_vals: List[float] = []
+    mean_claim_uncertainty_vals: List[float] = []
+    max_claim_uncertainty_vals: List[float] = []
+    min_claim_certainty_vals: List[float] = []
+    claim_support_total = 0
+    claim_contradiction_total = 0
+    claim_not_addressed_total = 0
     summary_rows: List[Dict[str, Any]] = []
 
     for idx, (claim, gold_label) in enumerate(pairs, start=1):
@@ -300,12 +346,35 @@ def run_benchmark(
         est_sampling = estimate_sampling_variance(prob_samples)
         est_self = estimate_self_disagreement(answer_samples, label_samples)
         est_nli = estimate_nli_consistency(rels)
-        estimators: List[EstimatorOutput] = [est_sampling, est_self, est_nli]
+
+        main_answer = answer_samples[0] if answer_samples else ""
+        alternative_answers = answer_samples[1:]
+        atomic_claims = [c.to_dict() for c in extract_atomic_claims(main_answer)]
+        claim_judgments: List[Dict[str, Any]] = []
+        for extracted_claim in atomic_claims:
+            for alt_idx, alt_answer in enumerate(alternative_answers, start=1):
+                judgment = judge_claim_against_answer(
+                    client=client,
+                    model=model,
+                    claim=extracted_claim["text"],
+                    answer_text=alt_answer,
+                    dry_run=dry_run,
+                )
+                row = judgment.to_dict()
+                row["claim_id"] = extracted_claim["claim_id"]
+                row["sample_index"] = alt_idx
+                claim_judgments.append(row)
+
+        claim_uncertainties = summarize_claim_uncertainties(atomic_claims, claim_judgments)
+        claim_stats = _claim_summary_stats(claim_uncertainties)
+        est_claims = build_claim_consistency_estimator(claim_uncertainties)
+        estimators: List[EstimatorOutput] = [est_sampling, est_self, est_nli, est_claims]
 
         predicted = majority_vote_label(label_samples)
         payload = build_uncertainty_payload(
-            content=answer_samples[0] if answer_samples else "",
+            content=main_answer,
             estimators=estimators,
+            claims=claim_uncertainties,
             prompt_variant=variant,
             expression=variant,
             metadata={
@@ -313,6 +382,9 @@ def run_benchmark(
                 "gold_label": gold_label,
                 "predicted_label": predicted,
                 "n_samples": n_samples,
+                "atomic_claims": atomic_claims,
+                "claim_judgments": claim_judgments,
+                "claim_uncertainties": claim_uncertainties,
             },
         )
 
@@ -328,6 +400,16 @@ def run_benchmark(
         all_correct.append(1 - err)
         clarity_vals.append(sum(clarity_scores) / len(clarity_scores))
         interp_vals.append(sum(interp_scores) / len(interp_scores))
+        claim_count_vals.append(float(claim_stats["num_claims"]))
+        if claim_stats["mean_claim_uncertainty"] is not None:
+            mean_claim_uncertainty_vals.append(float(claim_stats["mean_claim_uncertainty"]))
+        if claim_stats["max_claim_uncertainty"] is not None:
+            max_claim_uncertainty_vals.append(float(claim_stats["max_claim_uncertainty"]))
+        if claim_stats["min_claim_certainty"] is not None:
+            min_claim_certainty_vals.append(float(claim_stats["min_claim_certainty"]))
+        claim_support_total += int(claim_stats["total_claim_supports"])
+        claim_contradiction_total += int(claim_stats["total_claim_contradictions"])
+        claim_not_addressed_total += int(claim_stats["total_claim_not_addressed"])
 
         ex_payload = {
             "id": idx,
@@ -338,6 +420,10 @@ def run_benchmark(
             "label_samples": label_samples,
             "nli_relations": rels,
             "uncertainty_payload": payload,
+            "atomic_claims": atomic_claims,
+            "claim_judgments": claim_judgments,
+            "claim_uncertainties": claim_uncertainties,
+            "claim_stats": claim_stats,
             "clarity": {
                 "avg_clarity_score": sum(clarity_scores) / len(clarity_scores),
                 "avg_interpretability_score": sum(interp_scores) / len(interp_scores),
@@ -355,6 +441,7 @@ def run_benchmark(
                 "confidence": c,
                 "clarity_score": ex_payload["clarity"]["avg_clarity_score"],
                 "interpretability_score": ex_payload["clarity"]["avg_interpretability_score"],
+                **claim_stats,
             }
         )
         print(f"[{idx}/{len(pairs)}] done: gold={gold_label} pred={predicted} uncertainty={u:.3f}")
@@ -376,6 +463,13 @@ def run_benchmark(
         "ece_confidence": expected_calibration_error(all_conf, all_correct, bins=10),
         "avg_clarity_score": sum(clarity_vals) / len(clarity_vals) if clarity_vals else 0.0,
         "avg_interpretability_score": sum(interp_vals) / len(interp_vals) if interp_vals else 0.0,
+        "avg_num_claims": sum(claim_count_vals) / len(claim_count_vals) if claim_count_vals else 0.0,
+        "avg_mean_claim_uncertainty": _mean(mean_claim_uncertainty_vals),
+        "avg_max_claim_uncertainty": _mean(max_claim_uncertainty_vals),
+        "avg_min_claim_certainty": _mean(min_claim_certainty_vals),
+        "total_claim_supports": claim_support_total,
+        "total_claim_contradictions": claim_contradiction_total,
+        "total_claim_not_addressed": claim_not_addressed_total,
     }
 
     with open(os.path.join(run_dir, "summary.csv"), "w", newline="", encoding="utf-8") as f:
