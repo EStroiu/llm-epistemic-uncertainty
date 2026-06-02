@@ -9,7 +9,11 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    def load_dotenv() -> None:
+        return None
 
 # Allow importing the existing uncertainty pipeline from project root.
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
