@@ -10,7 +10,11 @@ import statistics
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    def load_dotenv() -> None:
+        return None
 
 
 NUMBER_RE = re.compile(r"\b\d[\d,]*(?:\.\d+)?\b")
