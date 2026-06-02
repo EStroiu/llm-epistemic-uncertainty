@@ -68,6 +68,23 @@ Useful overrides:
 MODEL="FAST.gpt-oss:120b" FEVER_SPLIT="paper_dev" MAX_EXAMPLES=500 NUM_RUNS=3 ./run_fever_benchmark.sh
 ```
 
+### Self-consistency baseline
+
+A third, separate benchmark script estimates uncertainty from repeated sampled outputs across a temperature ensemble instead of token confidence or hand-crafted features:
+
+```bash
+chmod +x scripts/run_fever_benchmark_self_consistency.sh
+./scripts/run_fever_benchmark_self_consistency.sh
+```
+
+This run uses a mixture of label entropy, label disagreement, and reason disagreement as the main uncertainty score, and stores the sampled reasons for inspection in the per-example JSON artifacts.
+
+Useful overrides:
+
+```bash
+MODEL="FAST.gpt-oss:120b" FEVER_SPLIT="paper_dev" MAX_EXAMPLES=200 SAMPLES_PER_CLAIM=7 TEMPERATURES="0.2,0.5,0.8" ./scripts/run_fever_benchmark_self_consistency.sh
+```
+
 Outputs are saved under `experiments/fever_<config>_<split>_<timestamp>/`:
 
 - `summary.csv`: per-example predictions + uncertainty
